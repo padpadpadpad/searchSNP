@@ -2,29 +2,23 @@
 
 **searchSNP** checks whether called SNPs and indels in a vcf are real by looking for them directly in the raw reads that were used to generate the vcf.
 
-Calling SNPs in mixed populations is renowned for high rates of false positives. These can be hard to distinguish and filter. This tool attempts to overcome this by searching for short kmers of each reference and alternate sequence in the raw reads. For every row of a VCF from a variant caller (e.g. from breseq) it builds the reference and alternate DNA sequence around the variant and counts **exact** matches of those sequences in the forward and reverse reads. From this, you can compare the presence/absence and proportion to that of your variant caller.
+**This is a development package and if you use it, we recommend checking the findings make sense for your usage (e.g. compare the proportions you get from searchSNP against those from your variant caller). We welcome any [Issues](https://github.com/padpadpadpad/searchSNP/issues) to improve the workflow and documentation.**
 
-If the variant **IS NOT** in the raw reads, then it is likely a false positive. If any of the variants also turn up in the ancestral sequences, then it could be a false positive.
+Calling SNPs in mixed populations is renowned for high rates of false positives. These can be hard to distinguish and filter. This tool attempts to overcome this by searching for short kmers of each reference and alternate sequence in the raw reads. For every row of a VCF from a variant caller (e.g. from [breseq](https://github.com/barricklab/breseq)) it builds the reference and alternate DNA sequence around the variant and counts **exact** matches of those sequences in the forward and reverse reads. From this, you can compare the presence/absence and proportion to that of your variant caller.
 
-There are other filters that can be applied to attempt to minimise false positives. Many of these are summarised and discussed in [Bush et al. 2021](https://doi.org/10.1099/mgen.0.000615).
+There are many filters that can be applied to attempt in an attempt to balance false positives and false negatives. Many of these are summarised and discussed in [Bush et al. 2021](https://doi.org/10.1099/mgen.0.000615). 
 
-**This is a development package and if you use it, you should check the findings make sense for your usage. I would welcome any Issues and Comments/Collaborations to improve the workflow and documentation.**
+**searchSNP** allows the following filters:
+
+- If the predicted variant **IS NOT** in any of the raw reads, then it is likely a false positive.
+- If the predicted variant **IS** in the reads of the ancestral/reference genome (due to homologous regions), it is likely a false positive.
 
 ## Install
 
 Prebuilt self-contained binaries for Windows, macOS and Linux are attached to every
 [release](https://github.com/padpadpadpad/searchSNP/releases). They need no Rust or other software installed.
 
-| platform | file |
-|---|---|
-| Linux, x86_64 (any distribution) | `searchSNP-x86_64-unknown-linux-musl.tar.gz` |
-| Linux, ARM64 | `searchSNP-aarch64-unknown-linux-musl.tar.gz` |
-| macOS, Apple Silicon | `searchSNP-aarch64-apple-darwin.tar.gz` |
-| macOS, Intel | `searchSNP-x86_64-apple-darwin.tar.gz` |
-| Windows 10/11, 64-bit | `searchSNP-x86_64-pc-windows-msvc.zip` |
-
-Download, unpack, and put `searchSNP` (`searchSNP.exe` on Windows) anywhere on your `PATH`. Or use a
-one-line installer:
+Download, unpack, and put `searchSNP` (`searchSNP.exe` on Windows) anywhere on your `PATH`. Or use a one-line installer:
 
 **macOS and Linux** - installs to `~/.local/bin` (set `INSTALL_DIR` to change):
 
@@ -54,16 +48,12 @@ cargo build --release
 # binary: target/release/searchSNP
 ```
 
-**macOS note:** if you downloaded a binary with a browser rather than the installer, macOS may refuse to
-run it ("cannot be opened because the developer cannot be verified"). Right-click the file and choose
-Open, or run `xattr -d com.apple.quarantine searchSNP`.
+**macOS note:** if you downloaded a binary with a browser rather than the installer, macOS may refuse to run it ("cannot be opened because the developer cannot be verified"). Right-click the file and choose Open, or run `xattr -d com.apple.quarantine searchSNP`.
 
 **If `searchSNP` is not found:**
 
-- In the folder you unpacked it into, run `./searchSNP` - Linux and macOS do not look in the current
-  directory, so the name on its own is not enough.
-- Straight after the installers, the binary is at `~/.local/bin/searchSNP`. Run that full path, or add
-  the directory to your `PATH` and open a new terminal. Use `~/.zshrc` for zsh, `~/.bashrc` for bash:
+- In the folder you unpacked it into, run `./searchSNP` - Linux and macOS do not look in the current directory, so the name on its own is not enough.
+- Straight after the installers, the binary is at `~/.local/bin/searchSNP`. Run that full path, or add the directory to your `PATH` and open a new terminal. Use `~/.zshrc` for zsh, `~/.bashrc` for bash:
 
 ```sh
 # bash
@@ -152,7 +142,7 @@ We recommend running **searchSNP** on the ancestor reads in the same way to see 
 | `search_status` | `full`, `shifted`, `truncated`, `skipped_too_short` or `skipped_too_many_combos` (see below) |
 | `shared_kmers` | A searched sequence is also used by another position: counts may be inflated |
 | `n_ambiguous_seqs` | Number of sequences excluded from the counts because they occur under both ref and alt |
-| `shared_in_reference` | A searched sequence also occurs OUTSIDE its focal window in the reference genome (e.g. a duplicated region): reads from the other copy are counted too, so counts of ALT and REF may be inflated. Empty when the check was skipped with `--no-ref-check` |
+| `shared_in_reference` | Which search sequences also occur OUTSIDE their focal window in the reference genome (e.g. a duplicated region), where reads from the other copy are counted too and can inflate the counts: `none`, `ref` (only a REF sequence occurs elsewhere), `alt` (only an ALT sequence does) or `both`. Empty when the check was skipped with `--no-ref-check`, or when the variant was skipped so nothing was searched. Per-sequence positions are in the `ref_occurrences*` columns below |
 
 A sequence that is never found counts 0, and `prop_alt` is 0 when `total` is 0.
 

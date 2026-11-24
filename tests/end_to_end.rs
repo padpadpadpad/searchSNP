@@ -284,3 +284,97 @@ fn ambiguous_sequence_is_flagged_and_excluded() {
     assert!(del_rows.iter().any(|r| r[11] == "true" && r[6] == "50"));
     fs::remove_dir_all(&dir).ok();
 }
+
+/// summary `shared_in_reference`: which of the ref/alt search sequences also occur
+/// somewhere else in the reference genome (`ref`, `alt`, `both` or `none`).
+#[test]
+fn shared_in_reference_labels_ref_alt_both_none() {
+    let g0 = genome().into_bytes();
+    let other_base = |b: u8| if b == b'A' { b'C' } else { b'A' };
+    // 23 bp window (flank 11) around a 1-based position, focal base replaced by `allele`
+    let window = |g: &[u8], pos: usize, allele: u8| {
+        let mut w = g[pos - 12..pos + 11].to_vec();
+        w[11] = allele;
+        w
+    };
+
+    let (p_alt, p_both, p_none) = (1000usize, 2000usize, 500usize);
+    let (r_alt, r_both, r_none) = (g0[p_alt - 1], g0[p_both - 1], g0[p_none - 1]);
+    let (a_alt, a_both, a_none) = (other_base(r_alt), other_base(r_both), other_base(r_none));
+
+    let w_alt = window(&g0, p_alt, a_alt);
+    let w_both_ref = window(&g0, p_both, r_both);
+    let w_both_alt = window(&g0, p_both, a_both);
+
+    // variant 1: only its ALT window occurs elsewhere; variant 2: both windows do
+    let mut g = g0;
+    g[2499..2522].copy_from_slice(&w_alt);
+    g[2749..2772].copy_from_slice(&w_both_ref);
+    g[2899..2922].copy_from_slice(&w_both_alt);
+
+    let dir = tmpdir("shared_ref");
+    fs::write(dir.join("ref.fa"), format!(">chr1\n{}\n", String::from_utf8(g).unwrap())).unwrap();
+    fs::write(
+        dir.join("v.vcf"),
+        format!(
+            "#CHROM\tPOS\tID\tREF\tALT\n\
+             chr1\t{p_alt}\t.\t{}\t{}\n\
+             chr1\t{p_both}\t.\t{}\t{}\n\
+             chr1\t{p_none}\t.\t{}\t{}\n",
+            r_alt as char,
+            a_alt as char,
+            r_both as char,
+            a_both as char,
+            r_none as char,
+            a_none as char
+        ),
+    )
+    .unwrap();
+    // the counts are irrelevant here, so the read files can be empty
+    fs::write(dir.join("fwd.fastq"), "").unwrap();
+    fs::write(dir.join("rev.fastq"), "").unwrap();
+
+    // run and return the shared_in_reference column (the last one), in VCF order
+    let column = |extra: &[&str], prefix: &str| -> Vec<String> {
+        let out = Command::new(env!("CARGO_BIN_EXE_searchSNP"))
+            .args([
+                "--vcf", "v.vcf", "--reference", "ref.fa", "--fwd", "fwd.fastq", "--rev",
+                "rev.fastq", "--prefix", prefix,
+            ])
+            .args(extra)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let t = fs::read_to_string(dir.join(format!("{prefix}_summary.csv"))).unwrap();
+        t.lines().skip(1).map(|l| l.split(',').last().unwrap().to_string()).collect()
+    };
+
+    assert_eq!(column(&[], "checked"), ["alt", "both", "none"]);
+    // nothing is checked with --no-ref-check, so the column is empty
+    assert_eq!(column(&["--no-ref-check"], "unchecked"), ["", "", ""]);
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// summary: a variant skipped by a rule has no sequences, so `shared_in_reference` is empty
+/// (not `none`, which would claim the reference had been checked).
+#[test]
+fn skipped_variant_has_empty_shared_in_reference() {
+    let g = genome();
+    let dir = tmpdir("skipped_shared");
+    fs::write(dir.join("ref.fa"), format!(">chr1\n{g}\n>tiny\nACGTACGTAC\n")).unwrap();
+    fs::write(dir.join("v.vcf"), "#CHROM\tPOS\tID\tREF\tALT\nchr1\t1500\t.\tA\tC\ntiny\t5\t.\tA\tG\n").unwrap();
+    fs::write(dir.join("fwd.fastq"), "").unwrap();
+    fs::write(dir.join("rev.fastq"), "").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_searchSNP"))
+        .args(["--vcf", "v.vcf", "--reference", "ref.fa", "--fwd", "fwd.fastq", "--rev", "rev.fastq"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let t = fs::read_to_string(dir.join("searchSNP_summary.csv")).unwrap();
+    let rows: Vec<Vec<&str>> = t.lines().skip(1).map(|l| l.split(',').collect()).collect();
+    assert_eq!(rows[1][17], "skipped_too_short");
+    assert_eq!(rows[1][20], "");
+    fs::remove_dir_all(&dir).ok();
+}

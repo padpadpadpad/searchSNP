@@ -82,13 +82,43 @@ fn sum_counts(idx: &[usize], counts: &[u64]) -> u64 {
     idx.iter().map(|&i| counts[i]).sum()
 }
 
+/// Which labels' search sequences also occur outside their focal window: `ref`, `alt`,
+/// `both` or `none` (see `refcheck`). Empty when the check did not run, or when the
+/// variant has no searchable sequence at all (e.g. it was skipped).
+fn shared_in_reference(sq: &VariantSeqs, ref_check: bool) -> &'static str {
+    if !ref_check {
+        return "";
+    }
+    let (mut searchable, mut r, mut a) = (false, false, false);
+    for s in &sq.seqs {
+        if canonical_of(&s.seq).is_none() {
+            continue; // not searchable (contains N), so it was never checked
+        }
+        searchable = true;
+        if !s.elsewhere.is_empty() {
+            if s.is_ref {
+                r = true;
+            } else {
+                a = true;
+            }
+        }
+    }
+    match (searchable, r, a) {
+        (false, _, _) => "",
+        (true, true, true) => "both",
+        (true, true, false) => "ref",
+        (true, false, true) => "alt",
+        (true, false, false) => "none",
+    }
+}
+
 /// Write the summary table: one row per VCF row (per ALT allele), in VCF order.
 ///
 /// `fwd` / `rev` are the k-mer counts from the forward / reverse reads. Missing k-mers count as 0, and
 /// `prop_alt` is 0 when there are no reads at all (`total` = 0).
 ///
 /// `ref_check`: whether the reference-occurrence check ran (see `refcheck`). If not, the
-/// `shared_in_reference` column is left empty instead of false.
+/// `shared_in_reference` column is left empty instead of `none`.
 pub fn write_summary<W: Write>(
     mut w: W,
     vars: &[Variant],
@@ -116,12 +146,8 @@ pub fn write_summary<W: Write>(
 
     for ((v, k), sq) in vars.iter().zip(kmers).zip(seqs) {
         let n_alts = per_site[&(v.chrom, v.pos)];
-        // shared_in_reference: a searched sequence also occurs outside its focal window
-        let shared_ref = if ref_check {
-            sq.seqs.iter().any(|s| !s.elsewhere.is_empty()).to_string()
-        } else {
-            String::new()
-        };
+        // shared_in_reference: which labels' sequences also occur outside their focal window
+        let shared = shared_in_reference(sq, ref_check);
         write!(
             w,
             "{},{},{},{}",
@@ -150,7 +176,7 @@ pub fn write_summary<W: Write>(
             sq.status.as_str(),
             k.shared,
             k.ambiguous.len(),
-            shared_ref
+            shared
         )?;
     }
     Ok(())
