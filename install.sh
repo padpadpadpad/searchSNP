@@ -45,14 +45,35 @@ mkdir -p "$install_dir"
 install -m 755 "$tmp/$BIN" "$install_dir/$BIN"
 
 say "Installed ${install_dir}/${BIN}"
+say "Run it now: ${install_dir}/${BIN} --version"
 
 case ":${PATH}:" in
   *":${install_dir}:"*) ;;
   *)
+    shell_name="$(basename "${SHELL:-sh}")"
     say ""
-    say "${install_dir} is not on your PATH. Add it with:"
-    say "  echo 'export PATH=\"${install_dir}:\$PATH\"' >> ~/.profile"
-    say "(use ~/.zshrc instead of ~/.profile if you use zsh)"
+    say "${install_dir} is not on your PATH, so '${BIN}' on its own will not be found yet."
+    case "$shell_name" in
+      fish)
+        say "Add it permanently with:"
+        say "  fish_add_path ${install_dir}"
+        ;;
+      zsh)
+        say "Add it permanently with:"
+        say "  echo 'export PATH=\"${install_dir}:\$PATH\"' >> ~/.zshrc"
+        say "  source ~/.zshrc"
+        ;;
+      bash)
+        say "Add it permanently with:"
+        say "  echo 'export PATH=\"${install_dir}:\$PATH\"' >> ~/.bashrc"
+        say "  source ~/.bashrc"
+        ;;
+      *)
+        say "Add this line to your shell startup file:"
+        say "  export PATH=\"${install_dir}:\$PATH\""
+        ;;
+    esac
+    say "Then open a new terminal. Until then, use the full path shown above."
     ;;
 esac
 

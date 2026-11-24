@@ -48,7 +48,8 @@ struct Args {
     #[arg(long, default_value_t = 11, value_parser = clap::value_parser!(u8).range(1..=MAX_FLANK as i64))]
     flank: u8,
 
-    /// Number of threads (default: all available)
+    /// K-mer counting threads, split across the two read files (default: all
+    /// available cores); one reader thread per file decompresses it
     #[arg(long)]
     threads: Option<usize>,
 
@@ -130,13 +131,21 @@ fn main() {
         eprintln!("{n_edge} variants near a chromosome end (shifted/truncated window), {n_skipped} skipped (see search_status)");
     }
 
-    // 3. count them in the forward and reverse reads (the two files are read at the same time)
-    let per_file = (threads / 2).max(1);
-    let (fwd_res, rev_res) = thread::scope(|s| {
-        let h1 = s.spawn(|| count_fastq(&args.fwd, &index, per_file));
-        let h2 = s.spawn(|| count_fastq(&args.rev, &index, per_file));
-        (h1.join().unwrap(), h2.join().unwrap())
-    });
+    // 3. count them in the forward and reverse reads (the two files are read at the same time).
+    // `threads` is the number of worker threads doing the k-mer lookups; each file also has a
+    // reader thread of its own that decompresses and parses it. With a single worker there is
+    // nothing to share, so the two files are counted one after the other.
+    let fwd_threads = threads.div_ceil(2);
+    let rev_threads = threads / 2;
+    let (fwd_res, rev_res) = if rev_threads == 0 {
+        (count_fastq(&args.fwd, &index, 1), count_fastq(&args.rev, &index, 1))
+    } else {
+        thread::scope(|s| {
+            let h1 = s.spawn(|| count_fastq(&args.fwd, &index, fwd_threads));
+            let h2 = s.spawn(|| count_fastq(&args.rev, &index, rev_threads));
+            (h1.join().unwrap(), h2.join().unwrap())
+        })
+    };
     let counts_fwd = fwd_res.unwrap_or_else(|e| die(&e));
     let counts_rev = rev_res.unwrap_or_else(|e| die(&e));
 

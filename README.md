@@ -58,6 +58,23 @@ cargo build --release
 run it ("cannot be opened because the developer cannot be verified"). Right-click the file and choose
 Open, or run `xattr -d com.apple.quarantine searchSNP`.
 
+**If `searchSNP` is not found:**
+
+- In the folder you unpacked it into, run `./searchSNP` - Linux and macOS do not look in the current
+  directory, so the name on its own is not enough.
+- Straight after the installers, the binary is at `~/.local/bin/searchSNP`. Run that full path, or add
+  the directory to your `PATH` and open a new terminal. Use `~/.zshrc` for zsh, `~/.bashrc` for bash:
+
+```sh
+# bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
+# zsh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+- Check the install with `searchSNP --version`.
+
 ## Licensing
 
 This program is licensed under an MIT license.
@@ -101,7 +118,7 @@ searchSNP --vcf output.vcf --reference reference.fasta \
 | option | default | meaning |
 |---|---|---|
 | `--flank N` | 11 | bases before the variant; sequences are `2*N+1` long. Allowed 1 to 15 |
-| `--threads N` | all cores | number of threads |
+| `--threads N` | all cores | number of k-mer counting threads, split across the two read files; each file also gets one extra thread that decompresses it |
 | `--outdir DIR` | `.` | output directory (created if missing) |
 | `--prefix NAME` | `searchSNP` | prefix of the output files |
 | `--strict` | off | stop with an error if any VCF REF disagrees with the reference FASTA |

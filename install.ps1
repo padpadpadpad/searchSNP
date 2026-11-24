@@ -34,6 +34,7 @@ Remove-Item $tmpZip
 
 $exe = Join-Path $installDir "$bin.exe"
 Write-Host "Installed $exe"
+Write-Host "Run it now: $exe --version"
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (-not $userPath) { $userPath = '' }
@@ -41,7 +42,8 @@ if (($userPath -split ';') -notcontains $installDir) {
     $newPath = if ($userPath) { "$userPath;$installDir" } else { $installDir }
     [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
     $env:Path = "$env:Path;$installDir"
-    Write-Host "Added $installDir to your user PATH. Open a new terminal for it to take effect."
+    Write-Host "Added $installDir to your user PATH."
+    Write-Host "Open a new terminal before running '$bin' on its own."
 }
 
 & $exe --version

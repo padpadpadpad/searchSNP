@@ -1,6 +1,6 @@
 [package]
 name = "searchSNP"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Check whether called SNPs/indels are supported by exact k-mer matches in raw reads"
 
@@ -13,8 +13,8 @@ name = "search_snp"
 path = "src/lib.rs"
 
 [dependencies]
-# gzip decompression of FASTQ files
-flate2 = "1"
+# gzip decompression of FASTQ files (zlib-rs: pure-Rust, fast, no C toolchain)
+flate2 = { version = "1", features = ["zlib-rs"] }
 # command line parsing (--help, validation of values)
 clap = { version = "4", features = ["derive"] }
 
