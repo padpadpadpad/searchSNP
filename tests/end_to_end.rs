@@ -232,6 +232,7 @@ fn sequence_counts_table_has_rows_and_placeholders() {
     let t = fs::read_to_string(dir.join("searchSNP_sequence_counts.csv")).unwrap();
     let rows: Vec<Vec<&str>> = t.lines().skip(1).map(|l| l.split(',').collect()).collect();
     assert_eq!(rows.len(), 3); // ref, alt, and the skipped placeholder
+    assert!(rows.iter().all(|r| r.len() == 18), "one column count for real and placeholder rows");
     assert_eq!((rows[0][4], rows[0][6], rows[0][7]), ("ref", "7", "5"));
     assert_eq!((rows[1][4], rows[1][6], rows[1][7]), ("alt", "3", "0"));
     assert_eq!((rows[2][5], rows[2][9], rows[2][6], rows[2][7]), ("", "skipped_too_short", "", ""));
@@ -376,5 +377,154 @@ fn skipped_variant_has_empty_shared_in_reference() {
     let rows: Vec<Vec<&str>> = t.lines().skip(1).map(|l| l.split(',').collect()).collect();
     assert_eq!(rows[1][17], "skipped_too_short");
     assert_eq!(rows[1][20], "");
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Ancestral filtering: a ref/alt pair whose ALT is present in the ancestral reads is
+/// removed, and the summary is rebuilt from the pairs that remain. A variant whose only
+/// pair is removed keeps its row with blank measurement columns.
+#[test]
+fn ancestor_filter_removes_pairs_and_keeps_rows() {
+    let g = genome();
+    let dir = tmpdir("ancestor_filter");
+    let (p1, p2, p3) = (1000usize, 1010usize, 2000usize);
+    let base = |p: usize| g.as_bytes()[p - 1];
+    let other = |x: u8| if x == b'A' { b'C' } else { b'A' };
+    let (r1, a1) = (base(p1), other(base(p1)));
+    let (r2, a2) = (base(p2), other(base(p2)));
+    let (r3, a3) = (base(p3), other(base(p3)));
+
+    // 61 bp reads, so one read spans the windows of both clustered variants
+    let read = |pos: usize, allele: u8, neighbour: Option<(usize, u8)>| {
+        let start = pos - 31;
+        let mut s = g.as_bytes()[start..pos + 30].to_vec();
+        s[pos - 1 - start] = allele;
+        if let Some((np, na)) = neighbour {
+            s[np - 1 - start] = na;
+        }
+        String::from_utf8(s).unwrap()
+    };
+
+    fs::write(dir.join("ref.fa"), format!(">chr1\n{g}\n")).unwrap();
+    fs::write(
+        dir.join("v.vcf"),
+        format!(
+            "#CHROM\tPOS\tID\tREF\tALT\n\
+             chr1\t{p1}\t.\t{}\t{}\n\
+             chr1\t{p2}\t.\t{}\t{}\n\
+             chr1\t{p3}\t.\t{}\t{}\n",
+            r1 as char, a1 as char, r2 as char, a2 as char, r3 as char, a3 as char
+        ),
+    )
+    .unwrap();
+
+    // evolved: both backgrounds of the cluster, plus the lone SNP
+    let evolved = vec![
+        (read(p1, r1, None), 30),            // pair 1 REF (neighbour = ref)
+        (read(p1, a1, None), 10),            // pair 1 ALT
+        (read(p1, r1, Some((p2, a2))), 10),  // pair 2 REF (neighbour = alt)
+        (read(p1, a1, Some((p2, a2))), 10),  // pair 2 ALT
+        (read(p3, r3, None), 8),
+        (read(p3, a3, None), 4),
+    ];
+    fs::write(dir.join("fwd.fastq"), fastq(&evolved)).unwrap();
+    fs::write(dir.join("rev.fastq"), fastq(&evolved)).unwrap();
+
+    // ancestor: the first background exists (REF seen), pair 2's ALT is already present,
+    // and so is the lone SNP's ALT. Only the forward file has reads, so the ancestor
+    // counts are easy to read off.
+    let ancestor = vec![
+        (read(p1, r1, None), 20),
+        (read(p1, a1, Some((p2, a2))), 5),
+        (read(p3, a3, None), 3),
+    ];
+    fs::write(dir.join("anc.fastq"), fastq(&ancestor)).unwrap();
+    fs::write(dir.join("empty.fastq"), "").unwrap();
+
+    let run = |prefix: &str, extra: &[&str], with_ancestor: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_searchSNP"));
+        cmd.args(["--vcf", "v.vcf", "--reference", "ref.fa", "--fwd", "fwd.fastq", "--rev", "rev.fastq"])
+            .args(["--prefix", prefix]);
+        if with_ancestor {
+            cmd.args(["--ancestor-fwd", "anc.fastq", "--ancestor-rev", "empty.fastq"]);
+        }
+        cmd.args(extra);
+        let out = cmd.current_dir(&dir).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    let rows = |name: &str| -> Vec<Vec<String>> {
+        fs::read_to_string(dir.join(name))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .map(|l| l.split(',').map(|s| s.to_string()).collect())
+            .collect()
+    };
+
+    run("searchSNP", &[], true);
+
+    // sequence_counts: one pair id per background, shared by its ref and alt row, plus the
+    // ancestral counts. Pair 2 of the cluster is the one whose ALT is in the ancestor.
+    let sc = rows("searchSNP_sequence_counts.csv");
+    assert!(sc.iter().all(|r| r.len() == 18));
+    let p1_rows: Vec<&Vec<String>> = sc.iter().filter(|r| r[1] == "1000").collect();
+    assert_eq!(p1_rows.len(), 4);
+    let ids: Vec<&str> = p1_rows.iter().map(|r| r[15].as_str()).collect();
+    assert_eq!(ids, ["1", "1", "2", "2"]);
+    let types: Vec<&str> = p1_rows.iter().map(|r| r[4].as_str()).collect();
+    assert_eq!(types, ["ref", "alt", "ref", "alt"]);
+    // kept background: REF seen 20 times, ALT never
+    assert_eq!((p1_rows[0][16].as_str(), p1_rows[0][17].as_str()), ("20", "0"));
+    assert_eq!(p1_rows[1][16], "0");
+    // dropped background: ALT seen 5 times, its REF partner never (the awkward case)
+    assert_eq!((p1_rows[2][16].as_str(), p1_rows[2][17].as_str()), ("0", "0"));
+    assert_eq!((p1_rows[3][16].as_str(), p1_rows[3][17].as_str()), ("5", "0"));
+
+    // filtered summary: only pair 1 of each cluster row is counted
+    let f = rows("searchSNP_summary_filtered.csv");
+    assert_eq!(f.len(), 3);
+    assert!(f.iter().all(|r| r.len() == 22));
+    let f_row = |pos: &str| f.iter().find(|r| r[1] == pos).unwrap();
+    let row1 = f_row("1000");
+    assert_eq!((row1[4].as_str(), row1[5].as_str(), row1[6].as_str()), ("30", "10", "40"));
+    assert_eq!(row1[7], "0.250000");
+    assert_eq!(row1[21], "partial");
+    let row2 = f_row("1010");
+    assert_eq!((row2[4].as_str(), row2[5].as_str()), ("30", "10"));
+    assert_eq!(row2[21], "partial");
+    // lone SNP: its only pair was dropped, so the row stays with blank measurements
+    let row3 = f_row("2000");
+    assert_eq!(row3[21], "all_dropped");
+    assert!(row3[4..12].iter().all(|c| c.is_empty()));
+    assert_eq!(row3[12], "23");
+    assert_eq!(row3[16], "");
+    assert_eq!(row3[17], "full");
+    assert_eq!((row3[18].as_str(), row3[19].as_str(), row3[20].as_str()), ("", "", ""));
+
+    // the unfiltered summary is unchanged
+    let s = rows("searchSNP_summary.csv");
+    assert!(s.iter().all(|r| r.len() == 21));
+    let u1 = s.iter().find(|r| r[1] == "1000").unwrap();
+    assert_eq!((u1[4].as_str(), u1[5].as_str(), u1[6].as_str()), ("40", "20", "60"));
+    assert_eq!(u1[7], "0.333333");
+    let u3 = s.iter().find(|r| r[1] == "2000").unwrap();
+    assert_eq!((u3[4].as_str(), u3[5].as_str()), ("8", "4"));
+
+    // a higher threshold keeps everything (ancestor ALT counts are 5 and 3)
+    run("min6", &["--min-alt-count", "6"], true);
+    let f6 = rows("min6_summary_filtered.csv");
+    let m1 = f6.iter().find(|r| r[1] == "1000").unwrap();
+    assert_eq!((m1[4].as_str(), m1[5].as_str(), m1[21].as_str()), ("40", "20", "kept"));
+    let m3 = f6.iter().find(|r| r[1] == "2000").unwrap();
+    assert_eq!((m3[4].as_str(), m3[5].as_str(), m3[21].as_str()), ("8", "4", "kept"));
+
+    // without the ancestor flags there is no filtered table and the columns are empty
+    run("plain", &[], false);
+    assert!(!dir.join("plain_summary_filtered.csv").exists());
+    let ps = rows("plain_sequence_counts.csv");
+    assert!(ps.iter().all(|r| r.len() == 18));
+    assert!(ps.iter().all(|r| r[16].is_empty() && r[17].is_empty()));
+    assert!(ps.iter().any(|r| r[15] == "1"));
+
     fs::remove_dir_all(&dir).ok();
 }

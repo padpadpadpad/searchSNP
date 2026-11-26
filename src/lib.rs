@@ -3,6 +3,7 @@
 //! Pipeline: read reference + VCF -> build search sequences around every variant
 //! -> count exact (canonical) k-mer matches in forward/reverse reads -> summarise per VCF row.
 
+pub mod filter;
 pub mod kmers;
 pub mod reference;
 pub mod refcheck;

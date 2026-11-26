@@ -1,6 +1,6 @@
 [package]
 name = "searchSNP"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Check whether called SNPs/indels are supported by exact k-mer matches in raw reads"
 

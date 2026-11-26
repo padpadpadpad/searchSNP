@@ -8,10 +8,13 @@ Calling SNPs in mixed populations is renowned for high rates of false positives.
 
 There are many filters that can be applied to attempt in an attempt to balance false positives and false negatives. Many of these are summarised and discussed in [Bush et al. 2021](https://doi.org/10.1099/mgen.0.000615). 
 
-**searchSNP** allows the following filters:
+For population-level sequencing of experimental evolution studies, we prefer a stringent approach where we might lose some true positives (have some false negatives), to minimise false positives.
 
-- If the predicted variant **IS NOT** in any of the raw reads, then it is likely a false positive.
-- If the predicted variant **IS** in the reads of the ancestral/reference genome (due to homologous regions), it is likely a false positive.
+Consequently, we believe that **searchSNP** can give the following insight:
+
+- If the predicted variant kmer **IS NOT** in any of the raw reads, then it is likely a false positive as it lacks direct read-level support. **We recommend removing predicted variants with no support in the raw reads.**
+- If the predicted variant kmer **IS** in the reads of the ancestral/reference genome, the variant should be interpreted with caution. Detection of the predicted variant kmer in the ancestor indicates that the sequence was already present before the experiment, either due to pre-existing variation, homologous sequence, or discrepancies between the ancestral genome and the reference assembly. **For analyses focused on identifying novel mutations, we recommend excluding ALT/REF k-mer pairs where the ALT k-mer is detected in ancestral reads.**
+- If the predicted variant kmer is only present on one strand (forward or reverse reads) then it could be a false positive. We recommend filtering out variants that are only present in one strand, as strand bias, where the alternate allele is disproportionately found on either the forward or reverse reads, increases the likelihood of a false-positive call [Guo et al 2012](https://doi.org/10.1186/1471-2164-13-666).
 
 ## Install
 
@@ -113,6 +116,8 @@ searchSNP --vcf output.vcf --reference reference.fasta \
 | `--prefix NAME` | `searchSNP` | prefix of the output files |
 | `--strict` | off | stop with an error if any VCF REF disagrees with the reference FASTA |
 | `--max-combos N` | 1024 | skip a variant that needs more haplotype combinations than this |
+| `--ancestor-fwd FILE`, `--ancestor-rev FILE` | off | ancestral reads (recommended, see below); pairs whose ALT is found in them are left out of `<prefix>_summary_filtered.csv` |
+| `--min-alt-count N` | 1 | ancestral ALT reads (forward + reverse) needed to drop a pair |
 
 `--fwd` and `--rev` are the paired read files (typically the R1 and R2 files).
 
@@ -125,6 +130,27 @@ done
 ```
 
 We recommend running **searchSNP** on the ancestor reads in the same way to see if variant kmers are present in the ancestral reads.
+
+### Ancestral filtering
+
+A variant that was already present before the experiment is not evidence of a new mutation, even when the reads support it. Pass the ancestral reads and **searchSNP** removes the haplotype pairs whose ALT sequence is found in them:
+
+```
+searchSNP --vcf sample.vcf --reference ref.fasta \
+          --fwd sample_R1.fastq.gz --rev sample_R2.fastq.gz \
+          --ancestor-fwd ancestor_R1.fastq.gz --ancestor-rev ancestor_R2.fastq.gz \
+          --prefix sample
+```
+
+This is optional but recommended. The ancestral reads are counted with the same sequences and k-mer index as the evolved reads, so a "pair" means the same thing in both samples and no separate ancestral run is needed.
+
+**What is removed.** Each variant is searched as one or more haplotype pairs: the REF and ALT sequences that share the same combination of neighbouring variants (the `haplotype` column in `sequence_counts.csv`). A pair is removed **as a whole** when its ALT sequence has at least `--min-alt-count` reads in the ancestor. The REF sequence goes with it: keeping it would compare ALT reads from a haplotype where the ALT is new against REF reads from a haplotype where it was already there. Counts, proportions and diagnostics are rebuilt from the pairs that remain, and a variant with no pairs left keeps its row with blank measurement columns.
+
+If the ancestral ALT is found but the ancestral REF of the same pair is not, the pair is still removed (the ALT is there), but treat it with more caution: that can happen when the haplotype is rare in the ancestor, and it also happens when the ALT k-mer matches somewhere else in the genome (`shared_in_reference = alt`).
+
+With the default `--min-alt-count 1`, a single ancestral read is enough to drop a pair. A base-call error at the focal position produces exactly the ALT k-mer, so if variants are being dropped on one or two reads, raise the threshold (e.g. `--min-alt-count 3`). The `ancestor_count_fwd`/`ancestor_count_rev` columns show how much support each decision had.
+
+Filtering answers "is this a new mutation", so it deliberately discards selection on standing variation (an ALT that was rare in the ancestor and common in the evolved sample). The unfiltered summary keeps those counts.
 
 ## Outputs
 
@@ -146,6 +172,14 @@ We recommend running **searchSNP** on the ancestor reads in the same way to see 
 
 A sequence that is never found counts 0, and `prop_alt` is 0 when `total` is 0.
 
+`<prefix>_summary_filtered.csv` is written only when `--ancestor-fwd`/`--ancestor-rev` are given. It has the same columns plus `ancestor_status`:
+
+| column | meaning |
+|---|---|
+| `ancestor_status` | `kept` (no pair removed), `partial` (some pairs removed, counts rebuilt from the rest), `all_dropped` (every pair removed: the eight count columns, `n_search_seqs`, `shared_kmers`, `n_ambiguous_seqs` and `shared_in_reference` are blank) or empty when the variant was skipped, so there was nothing to assess |
+
+`<prefix>_summary.csv` is still written unchanged, so the two files can be compared row for row.
+
 `<prefix>_sequence_counts.csv` is the raw output file before summarising at each variant. This returns one row per searched sequence.
 
 | column | meaning |
@@ -159,6 +193,8 @@ A sequence that is never found counts 0, and `prop_alt` is 0 when `total` is 0.
 | `ref_occurrences` | How many times this sequence occurs in the whole reference genome (any chromosome, either strand; the focal window counts as one). 0 is normal for alt sequences — the allele is not in the reference. Empty when the check was skipped or the sequence is not searchable (contains N) |
 | `ref_occurrences_elsewhere` | How many of those occurrences are OUTSIDE the focal window |
 | `ref_elsewhere_positions` | Where those elsewhere-occurrences are (`chrom:pos`, semicolon-separated, capped at 5) |
+| `haplotype` | 1-based id of the haplotype background within the variant. The REF and ALT rows that share it are one pair, which is what ancestral filtering removes together. Restarts at 1 for each variant |
+| `ancestor_count_fwd, ancestor_count_rev` | Reads in the ancestral forward / reverse files containing the sequence; 0 = searched but not seen. Empty when no ancestral reads were given, or when the sequence is not searchable |
 
 A variant skipped by a rule (`skipped_*`) has one placeholder row with empty sequence and
 empty counts, so every VCF row appears. Rows that share a k-mer show the same count.

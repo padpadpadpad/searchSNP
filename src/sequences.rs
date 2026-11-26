@@ -22,7 +22,7 @@
 
 use crate::reference::Reference;
 use crate::vcf::Variant;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::thread;
 
 /// One haplotype sequence to search for.
@@ -32,6 +32,10 @@ pub struct SearchSeq {
     pub seq: Vec<u8>,
     /// True if the focal variant carries its REF allele in this haplotype.
     pub is_ref: bool,
+    /// 1-based id of the haplotype background this sequence belongs to, within its
+    /// variant. The REF and ALT sequences of one background share it, so a ref/alt pair
+    /// can be identified without relying on row order.
+    pub haplotype: u32,
     /// 1-based reference position the window was built from (its left end, in the
     /// unedited reference coordinate frame; may differ from POS at chromosome ends or
     /// when a deletion makes the window slide).
@@ -169,6 +173,9 @@ fn build_variant(
     let mut choice = vec![0usize; n_sites];
     let mut out: Vec<SearchSeq> = Vec::new();
     let mut seen: HashSet<(Vec<u8>, bool)> = HashSet::new();
+    // background haplotype (the `choice` vector with the focal slot zeroed) -> 1-based id
+    let mut haplotypes: HashMap<Vec<usize>, u32> = HashMap::new();
+    let mut next_haplotype = 1u32;
 
     for _ in 0..total {
         // collect the edits chosen for this combination, in position order
@@ -222,9 +229,19 @@ fn build_variant(
             if buf.len() == eff_len {
                 let is_ref = choice[focal_slot] == 0;
                 if seen.insert((buf.clone(), is_ref)) {
+                    // the pair is identified by the other sites' choices: the focal slot
+                    // is what distinguishes REF from ALT within one background
+                    let mut background = choice.clone();
+                    background[focal_slot] = 0;
+                    let haplotype = *haplotypes.entry(background).or_insert_with(|| {
+                        let id = next_haplotype;
+                        next_haplotype += 1;
+                        id
+                    });
                     out.push(SearchSeq {
                         seq: buf,
                         is_ref,
+                        haplotype,
                         window_start: start,
                         n_occ_ref: 0,
                         elsewhere: Vec::new(),
@@ -380,6 +397,20 @@ mod tests {
         let (r, a) = run(&vars, 0, 3);
         assert_eq!(r, vec!["TGCAAGC", "TGCAATC"]);
         assert_eq!(a, vec!["TGCGAGC", "TGCGATC"]);
+    }
+
+    #[test]
+    fn haplotype_ids_pair_the_ref_and_alt_of_one_background() {
+        // lone SNP: one background, so both labels share id 1
+        let all = build_all(&[var(8, "A", "G")], &reference(), 3, 1 << 20, 1);
+        let ids: Vec<(u32, bool)> = all[0].seqs.iter().map(|s| (s.haplotype, s.is_ref)).collect();
+        assert_eq!(ids, vec![(1, true), (1, false)]);
+
+        // two sites: two backgrounds, each with one ref and one alt sequence
+        let vars = [var(8, "A", "G"), var(10, "G", "T")];
+        let all = build_all(&vars, &reference(), 3, 1 << 20, 1);
+        let ids: Vec<(u32, bool)> = all[0].seqs.iter().map(|s| (s.haplotype, s.is_ref)).collect();
+        assert_eq!(ids, vec![(1, true), (1, false), (2, true), (2, false)]);
     }
 
     #[test]

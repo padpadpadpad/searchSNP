@@ -143,6 +143,7 @@ mod tests {
             seqs: vec![crate::sequences::SearchSeq {
                 seq: seq.to_vec(),
                 is_ref: true,
+                haplotype: 1,
                 window_start,
                 n_occ_ref: 0,
                 elsewhere: Vec::new(),

@@ -5,7 +5,8 @@
 //! every variant in the reads and write a per-variant summary table.
 
 use clap::Parser;
-use search_snp::kmers::count_fastq;
+use search_snp::filter::filter_pairs;
+use search_snp::kmers::{count_fastq, KmerIndex};
 use search_snp::reference::Reference;
 use search_snp::refcheck::annotate;
 use search_snp::sequences::build_all;
@@ -69,6 +70,19 @@ struct Args {
     #[arg(long)]
     no_ref_check: bool,
 
+    /// Forward reads of the ancestor sample (optional, recommended). Haplotype pairs whose
+    /// ALT sequence is found in these reads are left out of <prefix>_summary_filtered.csv
+    #[arg(long, requires = "ancestor_rev")]
+    ancestor_fwd: Option<String>,
+
+    /// Reverse reads of the ancestor sample (required with --ancestor-fwd)
+    #[arg(long, requires = "ancestor_fwd")]
+    ancestor_rev: Option<String>,
+
+    /// Ancestor ALT reads (forward + reverse) needed to drop a ref/alt haplotype pair
+    #[arg(long, default_value_t = 1, requires = "ancestor_fwd")]
+    min_alt_count: u64,
+
     /// Skip variants that would need more haplotype combinations than this
     #[arg(long, default_value_t = 1024)]
     max_combos: u128,
@@ -78,6 +92,24 @@ struct Args {
 fn die(msg: &str) -> ! {
     eprintln!("error: {msg}");
     process::exit(1);
+}
+
+/// Count the k-mers of one forward/reverse read pair, splitting `threads` between the two
+/// files. With a single worker there is nothing to share, so the files are counted one
+/// after the other.
+fn count_pair(fwd: &str, rev: &str, index: &KmerIndex, threads: usize) -> (Vec<u64>, Vec<u64>) {
+    let fwd_threads = threads.div_ceil(2);
+    let rev_threads = threads / 2;
+    let (fwd_res, rev_res) = if rev_threads == 0 {
+        (count_fastq(fwd, index, 1), count_fastq(rev, index, 1))
+    } else {
+        thread::scope(|s| {
+            let h1 = s.spawn(|| count_fastq(fwd, index, fwd_threads));
+            let h2 = s.spawn(|| count_fastq(rev, index, rev_threads));
+            (h1.join().unwrap(), h2.join().unwrap())
+        })
+    };
+    (fwd_res.unwrap_or_else(|e| die(&e)), rev_res.unwrap_or_else(|e| die(&e)))
 }
 
 fn main() {
@@ -135,19 +167,31 @@ fn main() {
     // `threads` is the number of worker threads doing the k-mer lookups; each file also has a
     // reader thread of its own that decompresses and parses it. With a single worker there is
     // nothing to share, so the two files are counted one after the other.
-    let fwd_threads = threads.div_ceil(2);
-    let rev_threads = threads / 2;
-    let (fwd_res, rev_res) = if rev_threads == 0 {
-        (count_fastq(&args.fwd, &index, 1), count_fastq(&args.rev, &index, 1))
-    } else {
-        thread::scope(|s| {
-            let h1 = s.spawn(|| count_fastq(&args.fwd, &index, fwd_threads));
-            let h2 = s.spawn(|| count_fastq(&args.rev, &index, rev_threads));
-            (h1.join().unwrap(), h2.join().unwrap())
-        })
+    let (counts_fwd, counts_rev) = count_pair(&args.fwd, &args.rev, &index, threads);
+
+    // 3b. optional: count the ancestral reads with the same index, so a pair means the same
+    // thing in both samples
+    let ancestor = match (&args.ancestor_fwd, &args.ancestor_rev) {
+        (Some(af), Some(ar)) => {
+            let t_anc = Instant::now();
+            let counts = count_pair(af, ar, &index, threads);
+            eprintln!("ancestor reads counted ({:.1}s)", t_anc.elapsed().as_secs_f64());
+            Some(counts)
+        }
+        _ => None,
     };
-    let counts_fwd = fwd_res.unwrap_or_else(|e| die(&e));
-    let counts_rev = rev_res.unwrap_or_else(|e| die(&e));
+
+    // 3c. remove the haplotype pairs whose ALT is present in the ancestor, and rebuild the
+    // per-variant k-mer lists from what remains
+    let filtered = ancestor.as_ref().map(|(anc_fwd, anc_rev)| {
+        let (fseqs, fkmers, status, stats) =
+            filter_pairs(&seqs, vars, &index, anc_fwd, anc_rev, args.min_alt_count);
+        eprintln!(
+            "ancestor filter: {} of {} pairs removed; {} variants partial, {} with no pairs left",
+            stats.dropped, stats.pairs, stats.partial, stats.all_dropped
+        );
+        (fseqs, fkmers, status)
+    });
 
     // 4. write the outputs
     fs::create_dir_all(&args.outdir).unwrap_or_else(|e| die(&format!("cannot create {}: {e}", args.outdir)));
@@ -155,10 +199,35 @@ fn main() {
         let p = format!("{}/{}_{}", args.outdir, args.prefix, suffix);
         BufWriter::new(File::create(&p).unwrap_or_else(|e| die(&format!("cannot write {p}: {e}"))))
     };
-    write_summary(open("summary.csv"), vars, &vk, &seqs, &reference, &counts_fwd, &counts_rev, !args.no_ref_check)
+    write_summary(open("summary.csv"), vars, &vk, &seqs, &reference, &counts_fwd, &counts_rev, !args.no_ref_check, None)
         .unwrap_or_else(|e| die(&format!("write error: {e}")));
-    write_sequence_counts(open("sequence_counts.csv"), vars, &seqs, &vk, &index, &reference, &counts_fwd, &counts_rev, !args.no_ref_check)
+    write_sequence_counts(
+        open("sequence_counts.csv"),
+        vars,
+        &seqs,
+        &vk,
+        &index,
+        &reference,
+        &counts_fwd,
+        &counts_rev,
+        !args.no_ref_check,
+        ancestor.as_ref().map(|(a, b)| (a.as_slice(), b.as_slice())),
+    )
+    .unwrap_or_else(|e| die(&format!("write error: {e}")));
+    if let Some((fseqs, fkmers, status)) = &filtered {
+        write_summary(
+            open("summary_filtered.csv"),
+            vars,
+            fkmers,
+            fseqs,
+            &reference,
+            &counts_fwd,
+            &counts_rev,
+            !args.no_ref_check,
+            Some(status),
+        )
         .unwrap_or_else(|e| die(&format!("write error: {e}")));
+    }
 
     eprintln!("done in {:.1}s, wrote {}/{}_summary.csv", t0.elapsed().as_secs_f64(), args.outdir, args.prefix);
 }
